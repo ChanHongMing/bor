@@ -552,7 +552,6 @@ func (t *TrieDB) Commit(collectLeaf bool) (common.Hash, *trienode.NodeSet) {
 // Witness returns the set of accessed trie nodes (RLP-encoded MPT nodes).
 // This collects proof nodes for all accounts and storage slots that were accessed.
 func (t *TrieDB) Witness() map[string]struct{} {
-	// Always log when Witness() is called, even if maps are empty
 	log.Info("TrieDB.Witness() called",
 		"accessed_accounts", len(t.accessedAccounts),
 		"accessed_storage_accounts", len(t.accessedStorage),

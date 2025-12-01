@@ -3129,7 +3129,6 @@ func (bc *BlockChain) insertChainWithWitnesses(chain types.Blocks, setHead bool,
 			// only block being inserted. A bit crude, but witnesses are huge,
 			// so we refuse to make an entire chain of them.
 			if bc.cfg.VmConfig.StatelessSelfValidation || (makeWitness && len(chain) == 1) {
-				log.Info("Creating witness for block", "block", block.NumberU64(), "makeWitness", makeWitness, "chainLen", len(chain), "statelessSelfValidation", bc.cfg.VmConfig.StatelessSelfValidation)
 				witness, err = stateless.NewWitness(block.Header(), bc)
 				if err != nil {
 					log.Error("Failed to create witness", "block", block.NumberU64(), "err", err)
@@ -3137,7 +3136,7 @@ func (bc *BlockChain) insertChainWithWitnesses(chain types.Blocks, setHead bool,
 				}
 				log.Info("Witness created successfully", "block", block.NumberU64())
 			} else {
-				log.Debug("Skipping witness generation", "block", block.NumberU64(), "makeWitness", makeWitness, "chainLen", len(chain), "statelessSelfValidation", bc.cfg.VmConfig.StatelessSelfValidation)
+				log.Info("Skipping witness generation", "block", block.NumberU64(), "makeWitness", makeWitness, "chainLen", len(chain), "statelessSelfValidation", bc.cfg.VmConfig.StatelessSelfValidation)
 			}
 			// Bor: We start the prefetcher in process block function called below
 			// and not here as we copy state for block-stm in that function. Also,
@@ -3182,7 +3181,7 @@ func (bc *BlockChain) insertChainWithWitnesses(chain types.Blocks, setHead bool,
 				log.Info("Witness computed successfully", "block", block.NumberU64())
 			}
 		} else {
-			log.Debug("Skipping witness computation", "block", block.NumberU64(), "computeWitness", computeWitness)
+			log.Info("Skipping witness computation", "block", block.NumberU64(), "computeWitness", computeWitness)
 		}
 
 		receipts, logs, usedGas, statedb, vtime, err := bc.ProcessBlock(block, parent, witness, &followupInterrupt)

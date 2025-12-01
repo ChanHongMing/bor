@@ -104,9 +104,16 @@ type TrieDB struct {
 	db   *Database
 	root common.Hash
 
-	// Local cache of changes for reading modified data
+	// Local cache of uncommitted changes (new changes since last commit)
 	accounts map[Address]*types.StateAccount // nil means deleted
 	storage  map[Address]map[Hash][]byte     // nil/empty means deleted
+
+	// Buffer for accumulated committed changes (used for reads and overlay building)
+	committedAccounts map[Address]*types.StateAccount
+	committedStorage  map[Address]map[Hash][]byte
+
+	// Last computed root (for optimization when no new changes)
+	lastComputedRoot common.Hash
 
 	// Track accessed accounts/storage for witness generation
 	accessedAccounts map[Address]struct{}          // Set of accessed account addresses
@@ -124,12 +131,15 @@ func NewTrieDB(root common.Hash, db *Database) (*TrieDB, error) {
 	}
 
 	return &TrieDB{
-		db:               db,
-		root:             root,
-		accounts:         make(map[Address]*types.StateAccount),
-		storage:          make(map[Address]map[Hash][]byte),
-		accessedAccounts: make(map[Address]struct{}),
-		accessedStorage:  make(map[Address]map[Hash]struct{}),
+		db:                db,
+		root:              root,
+		accounts:          make(map[Address]*types.StateAccount),
+		storage:           make(map[Address]map[Hash][]byte),
+		committedAccounts: make(map[Address]*types.StateAccount),
+		committedStorage:  make(map[Address]map[Hash][]byte),
+		lastComputedRoot:  root,
+		accessedAccounts:  make(map[Address]struct{}),
+		accessedStorage:   make(map[Address]map[Hash]struct{}),
 	}, nil
 }
 
@@ -166,6 +176,35 @@ func (t *TrieDB) Copy() *TrieDB {
 		}
 	}
 
+	// Deep copy committedAccounts
+	committedAccounts := make(map[Address]*types.StateAccount, len(t.committedAccounts))
+	for addr, acc := range t.committedAccounts {
+		if acc != nil {
+			accCopy := *acc
+			committedAccounts[addr] = &accCopy
+		} else {
+			committedAccounts[addr] = nil
+		}
+	}
+
+	// Deep copy committedStorage
+	committedStorage := make(map[Address]map[Hash][]byte, len(t.committedStorage))
+	for addr, slots := range t.committedStorage {
+		if slots != nil {
+			slotsCopy := make(map[Hash][]byte, len(slots))
+			for slot, value := range slots {
+				if value != nil {
+					valueCopy := make([]byte, len(value))
+					copy(valueCopy, value)
+					slotsCopy[slot] = valueCopy
+				} else {
+					slotsCopy[slot] = nil
+				}
+			}
+			committedStorage[addr] = slotsCopy
+		}
+	}
+
 	// Deep copy accessed maps
 	accessedAccounts := make(map[Address]struct{}, len(t.accessedAccounts))
 	for addr := range t.accessedAccounts {
@@ -182,12 +221,15 @@ func (t *TrieDB) Copy() *TrieDB {
 	}
 
 	return &TrieDB{
-		db:               t.db,
-		root:             t.root,
-		accounts:         accounts,
-		storage:          storage,
-		accessedAccounts: accessedAccounts,
-		accessedStorage:  accessedStorage,
+		db:                t.db,
+		root:              t.root,
+		accounts:          accounts,
+		storage:           storage,
+		committedAccounts: committedAccounts,
+		committedStorage:  committedStorage,
+		lastComputedRoot:  t.lastComputedRoot,
+		accessedAccounts:  accessedAccounts,
+		accessedStorage:   accessedStorage,
 	}
 }
 
@@ -205,8 +247,20 @@ func (t *TrieDB) GetAccount(address common.Address) (*types.StateAccount, error)
 	// Track accessed account for witness generation
 	t.accessedAccounts[addr] = struct{}{}
 
-	// Check local cache first
+	// Track accessed account for witness generation
+	t.accessedAccounts[addr] = struct{}{}
+
+	// Check uncommitted changes first
 	if acc, exists := t.accounts[addr]; exists {
+		if acc == nil {
+			// Account was deleted
+			return nil, ErrAccountNotFound
+		}
+		return acc, nil
+	}
+
+	// Check committed buffer next
+	if acc, exists := t.committedAccounts[addr]; exists {
 		if acc == nil {
 			// Account was deleted
 			return nil, ErrAccountNotFound
@@ -244,8 +298,25 @@ func (t *TrieDB) GetStorage(addr common.Address, key []byte) ([]byte, error) {
 	}
 	t.accessedStorage[address][slot] = struct{}{}
 
-	// Check local cache first
+	// Track accessed storage for witness generation
+	if t.accessedStorage[address] == nil {
+		t.accessedStorage[address] = make(map[Hash]struct{})
+	}
+	t.accessedStorage[address][slot] = struct{}{}
+
+	// Check uncommitted changes first
 	if addrStorage, exists := t.storage[address]; exists {
+		if value, exists := addrStorage[slot]; exists {
+			if len(value) == 0 {
+				// Storage was deleted
+				return nil, nil
+			}
+			return value, nil
+		}
+	}
+
+	// Check committed buffer next
+	if addrStorage, exists := t.committedStorage[address]; exists {
 		if value, exists := addrStorage[slot]; exists {
 			if len(value) == 0 {
 				// Storage was deleted
@@ -374,23 +445,23 @@ func (t *TrieDB) UpdateContractCode(address common.Address, codeHash common.Hash
 	return nil
 }
 
-// buildOverlay creates an overlay state from the cached changes
+// buildOverlay creates an overlay state from the committed changes buffer
 func (t *TrieDB) buildOverlay() (*triedb.OverlayState, error) {
 	overlay, err := triedb.NewOverlayState()
 	if err != nil {
 		return nil, err
 	}
 
-	// Insert all account changes
-	for addr, acc := range t.accounts {
+	// Insert all account changes from committed buffer
+	for addr, acc := range t.committedAccounts {
 		if err := overlay.InsertAccount(addr, FromStateAccount(acc)); err != nil {
 			overlay.Close()
 			return nil, err
 		}
 	}
 
-	// Insert all storage changes
-	for addr, slots := range t.storage {
+	// Insert all storage changes from committed buffer
+	for addr, slots := range t.committedStorage {
 		for slot, value := range slots {
 			if len(value) == 0 {
 				// Deletion
@@ -429,6 +500,29 @@ func (t *TrieDB) Hash() common.Hash {
 // Commit computes the new state root by applying the overlay changes
 // Note: This does NOT persist changes to the database, it only computes the new root
 func (t *TrieDB) Commit(collectLeaf bool) (common.Hash, *trienode.NodeSet) {
+	// Optimization: if no new changes since last commit, return cached root
+	if len(t.accounts) == 0 && len(t.storage) == 0 {
+		return t.lastComputedRoot, nil
+	}
+
+	// Merge uncommitted changes into committed buffers
+	for addr, acc := range t.accounts {
+		t.committedAccounts[addr] = acc
+	}
+	for addr, slots := range t.storage {
+		if t.committedStorage[addr] == nil {
+			t.committedStorage[addr] = make(map[Hash][]byte)
+		}
+		for slot, value := range slots {
+			t.committedStorage[addr][slot] = value
+		}
+	}
+
+	// Clear uncommitted changes
+	t.accounts = make(map[Address]*types.StateAccount)
+	t.storage = make(map[Address]map[Hash][]byte)
+
+	// Build overlay from committed buffers
 	overlay, err := t.buildOverlay()
 	if err != nil {
 		log.Error("Failed to build overlay", "err", err)
@@ -449,7 +543,10 @@ func (t *TrieDB) Commit(collectLeaf bool) (common.Hash, *trienode.NodeSet) {
 		return t.root, nil
 	}
 
-	return common.Hash(root), nil
+	// Cache the computed root for future calls with no changes
+	t.lastComputedRoot = common.Hash(root)
+
+	return t.lastComputedRoot, nil
 }
 
 // Witness returns the set of accessed trie nodes (RLP-encoded MPT nodes).

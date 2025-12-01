@@ -494,14 +494,15 @@ func (s *StateDB) SetWitness(witness *stateless.Witness) {
 // state trie concurrently while the state is mutated so that when we reach the
 // commit phase, most of the needed data is already hot.
 func (s *StateDB) StartPrefetcher(namespace string, witness *stateless.Witness) {
+	// Enable witness collection if requested.
+	s.witness = witness
+
 	if s.db.TrieDB().IsUsingTDB() {
+		// triedb doesn't use prefetcher, but witness is still set above.
 		return
 	}
 	// Terminate any previously running prefetcher
 	s.StopPrefetcher()
-
-	// Enable witness collection if requested
-	s.witness = witness
 
 	// With the switch to the Proof-of-Stake consensus algorithm, block production
 	// rewards are now handled at the consensus layer. Consequently, a block may

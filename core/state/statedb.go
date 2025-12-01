@@ -1312,7 +1312,9 @@ func (s *StateDB) IntermediateRoot(deleteEmptyObjects bool) common.Hash {
 
 				// If witness building is enabled and the state object has a trie,
 				// gather the witnesses for its specific storage trie
-				if s.witness != nil && obj.trie != nil {
+				// Note: For TrieDB mode, storage tries return self (account trie),
+				// so witness is collected from account trie in Finalise()
+				if s.witness != nil && obj.trie != nil && !s.db.TrieDB().IsUsingTDB() {
 					s.witness.AddState(obj.trie.Witness())
 				}
 			}
@@ -1322,7 +1324,8 @@ func (s *StateDB) IntermediateRoot(deleteEmptyObjects bool) common.Hash {
 	// If witness building is enabled, gather all the read-only accesses.
 	// Skip witness collection in Verkle mode, they will be gathered
 	// together at the end.
-	if s.witness != nil && !s.db.TrieDB().IsVerkle() {
+	// Note: For TrieDB mode, witness is collected from the account trie in Finalise()
+	if s.witness != nil && !s.db.TrieDB().IsVerkle() && !s.db.TrieDB().IsUsingTDB() {
 		// Pull in anything that has been accessed before destruction
 		for _, obj := range s.stateObjectsDestruct {
 			// Skip any objects that haven't touched their storage
@@ -1414,6 +1417,10 @@ func (s *StateDB) IntermediateRoot(deleteEmptyObjects bool) common.Hash {
 
 	// If witness building is enabled, gather the account trie witness
 	if s.witness != nil {
+		// Log trie type for debugging
+		if s.db.TrieDB().IsUsingTDB() {
+			log.Info("Collecting witness from TrieDB account trie", "trie_type", fmt.Sprintf("%T", s.trie))
+		}
 		s.witness.AddState(s.trie.Witness())
 	}
 	return hash

@@ -107,6 +107,10 @@ type TrieDB struct {
 	// Local cache of changes for reading modified data
 	accounts map[Address]*types.StateAccount // nil means deleted
 	storage  map[Address]map[Hash][]byte     // nil/empty means deleted
+
+	// Track accessed accounts/storage for witness generation
+	accessedAccounts map[Address]struct{}          // Set of accessed account addresses
+	accessedStorage  map[Address]map[Hash]struct{} // Set of accessed storage slots
 }
 
 // NewTrieDB creates a new Trie implementation using triedb-go
@@ -120,10 +124,12 @@ func NewTrieDB(root common.Hash, db *Database) (*TrieDB, error) {
 	}
 
 	return &TrieDB{
-		db:       db,
-		root:     root,
-		accounts: make(map[Address]*types.StateAccount),
-		storage:  make(map[Address]map[Hash][]byte),
+		db:               db,
+		root:             root,
+		accounts:         make(map[Address]*types.StateAccount),
+		storage:          make(map[Address]map[Hash][]byte),
+		accessedAccounts: make(map[Address]struct{}),
+		accessedStorage:  make(map[Address]map[Hash]struct{}),
 	}, nil
 }
 
@@ -160,11 +166,28 @@ func (t *TrieDB) Copy() *TrieDB {
 		}
 	}
 
+	// Deep copy accessed maps
+	accessedAccounts := make(map[Address]struct{}, len(t.accessedAccounts))
+	for addr := range t.accessedAccounts {
+		accessedAccounts[addr] = struct{}{}
+	}
+
+	accessedStorage := make(map[Address]map[Hash]struct{}, len(t.accessedStorage))
+	for addr, slots := range t.accessedStorage {
+		slotsCopy := make(map[Hash]struct{}, len(slots))
+		for slot := range slots {
+			slotsCopy[slot] = struct{}{}
+		}
+		accessedStorage[addr] = slotsCopy
+	}
+
 	return &TrieDB{
-		db:       t.db,
-		root:     t.root,
-		accounts: accounts,
-		storage:  storage,
+		db:               t.db,
+		root:             t.root,
+		accounts:         accounts,
+		storage:          storage,
+		accessedAccounts: accessedAccounts,
+		accessedStorage:  accessedStorage,
 	}
 }
 
@@ -178,6 +201,9 @@ func (t *TrieDB) GetKey(key []byte) []byte {
 // GetAccount retrieves an account from the trie
 func (t *TrieDB) GetAccount(address common.Address) (*types.StateAccount, error) {
 	addr := Address(address)
+
+	// Track accessed account for witness generation
+	t.accessedAccounts[addr] = struct{}{}
 
 	// Check local cache first
 	if acc, exists := t.accounts[addr]; exists {
@@ -212,6 +238,12 @@ func (t *TrieDB) GetStorage(addr common.Address, key []byte) ([]byte, error) {
 	copy(slot[:], key)
 	address := Address(addr)
 
+	// Track accessed storage for witness generation
+	if t.accessedStorage[address] == nil {
+		t.accessedStorage[address] = make(map[Hash]struct{})
+	}
+	t.accessedStorage[address][slot] = struct{}{}
+
 	// Check local cache first
 	if addrStorage, exists := t.storage[address]; exists {
 		if value, exists := addrStorage[slot]; exists {
@@ -244,6 +276,9 @@ func (t *TrieDB) GetStorage(addr common.Address, key []byte) ([]byte, error) {
 func (t *TrieDB) UpdateAccount(address common.Address, account *types.StateAccount, codeLen int) error {
 	addr := Address(address)
 
+	// Track accessed account for witness generation
+	t.accessedAccounts[addr] = struct{}{}
+
 	// Update local cache
 	t.accounts[addr] = account
 
@@ -259,6 +294,12 @@ func (t *TrieDB) UpdateStorage(addr common.Address, key, value []byte) error {
 	var slot Hash
 	copy(slot[:], key)
 	address := Address(addr)
+
+	// Track accessed storage for witness generation
+	if t.accessedStorage[address] == nil {
+		t.accessedStorage[address] = make(map[Hash]struct{})
+	}
+	t.accessedStorage[address][slot] = struct{}{}
 
 	// Initialize storage map for this address if needed
 	if t.storage[address] == nil {
@@ -288,6 +329,9 @@ func (t *TrieDB) UpdateStorage(addr common.Address, key, value []byte) error {
 func (t *TrieDB) DeleteAccount(address common.Address) error {
 	addr := Address(address)
 
+	// Track accessed account for witness generation
+	t.accessedAccounts[addr] = struct{}{}
+
 	// Mark as deleted in cache
 	t.accounts[addr] = nil
 
@@ -303,6 +347,12 @@ func (t *TrieDB) DeleteStorage(addr common.Address, key []byte) error {
 	var slot Hash
 	copy(slot[:], key)
 	address := Address(addr)
+
+	// Track accessed storage for witness generation
+	if t.accessedStorage[address] == nil {
+		t.accessedStorage[address] = make(map[Hash]struct{})
+	}
+	t.accessedStorage[address][slot] = struct{}{}
 
 	// Initialize storage map for this address if needed
 	if t.storage[address] == nil {
@@ -402,11 +452,99 @@ func (t *TrieDB) Commit(collectLeaf bool) (common.Hash, *trienode.NodeSet) {
 	return common.Hash(root), nil
 }
 
-// Witness returns the set of accessed trie nodes
-// TODO: Placeholder - not yet implemented
+// Witness returns the set of accessed trie nodes (RLP-encoded MPT nodes).
+// This collects proof nodes for all accounts and storage slots that were accessed.
 func (t *TrieDB) Witness() map[string]struct{} {
-	// Placeholder implementation
-	return nil
+	// Always log when Witness() is called, even if maps are empty
+	log.Info("TrieDB.Witness() called",
+		"accessed_accounts", len(t.accessedAccounts),
+		"accessed_storage_accounts", len(t.accessedStorage),
+		"modified_accounts", len(t.accounts),
+		"modified_storage_accounts", len(t.storage),
+		"root", t.root)
+	witnessNodes := make(map[string]struct{})
+
+	// Create a read-only transaction to generate proofs.
+	tx, err := t.db.BeginRO()
+	if err != nil {
+		log.Warn("Failed to begin RO transaction for witness", "err", err)
+		return witnessNodes
+	}
+	defer tx.Commit()
+
+	// Track which accounts we've already processed to avoid duplicates.
+	processedAccounts := make(map[Address]struct{})
+
+	// Collect proof nodes for all accessed accounts (including read-only).
+	for addr := range t.accessedAccounts {
+		processedAccounts[addr] = struct{}{}
+
+		proofNodes, err := tx.GetAccountProofNodes(triedb.Address(addr))
+		if err != nil {
+			log.Debug("Failed to get account proof nodes", "addr", addr, "err", err)
+			continue
+		}
+
+		nodes, err := proofNodes.GetAll()
+		if err != nil {
+			log.Debug("Failed to get all proof nodes", "addr", addr, "err", err)
+			proofNodes.Free()
+			continue
+		}
+
+		// Add all RLP-encoded nodes to witness.
+		for _, node := range nodes {
+			witnessNodes[string(node)] = struct{}{}
+		}
+
+		proofNodes.Free()
+	}
+
+	// Collect proof nodes for all accessed storage slots (including read-only).
+	for addr, slots := range t.accessedStorage {
+		// Mark account as processed if not already.
+		if _, exists := processedAccounts[addr]; !exists {
+			processedAccounts[addr] = struct{}{}
+
+			// Get account proof nodes (needed to access storage trie).
+			proofNodes, err := tx.GetAccountProofNodes(triedb.Address(addr))
+			if err == nil {
+				nodes, err := proofNodes.GetAll()
+				if err == nil {
+					for _, node := range nodes {
+						witnessNodes[string(node)] = struct{}{}
+					}
+				}
+				proofNodes.Free()
+			}
+		}
+
+		// Get storage proof nodes for each accessed slot.
+		for slot := range slots {
+			proofNodes, err := tx.GetStorageProofNodes(triedb.Address(addr), triedb.Hash(slot))
+			if err != nil {
+				log.Debug("Failed to get storage proof nodes", "addr", addr, "slot", slot, "err", err)
+				continue
+			}
+
+			nodes, err := proofNodes.GetAll()
+			if err != nil {
+				log.Debug("Failed to get all storage proof nodes", "addr", addr, "slot", slot, "err", err)
+				proofNodes.Free()
+				continue
+			}
+
+			// Add all RLP-encoded nodes to witness.
+			for _, node := range nodes {
+				witnessNodes[string(node)] = struct{}{}
+			}
+
+			proofNodes.Free()
+		}
+	}
+
+	log.Info("TrieDB witness generation complete", "nodes_collected", len(witnessNodes))
+	return witnessNodes
 }
 
 // NodeIterator returns an iterator for trie nodes

@@ -380,6 +380,8 @@ func (db *Database) IsVerkle() bool {
 }
 
 func (db *Database) IsUsingTDB() bool {
+	log.Info("db.config.PathDB", "PathDB", db.config.PathDB)
+	log.Info("db.config.PathDB.UseTrieDB", "UseTrieDB", db.config.PathDB.UseTrieDB)
 	return db.config.PathDB != nil && db.config.PathDB.UseTrieDB
 }
 

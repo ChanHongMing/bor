@@ -2236,11 +2236,11 @@ func (bc *BlockChain) writeBlockWithState(block *types.Block, receipts []*types.
 			log.Error("error in witness encoding", "caughterr", err)
 		}
 
-		log.Debug("Writing witness", "block", block.NumberU64(), "hash", block.Hash(), "header", statedb.Witness().Header())
+		log.Info("Writing witness", "block", block.NumberU64(), "hash", block.Hash(), "size", len(witBuf.Bytes()), "state_nodes", len(statedb.Witness().State))
 
 		rawdb.WriteWitness(blockBatch, block.Hash(), witBuf.Bytes())
 	} else {
-		log.Debug("No witness to write", "block", block.NumberU64())
+		log.Info("No witness to write", "block", block.NumberU64())
 	}
 
 	if err := blockBatch.Write(); err != nil {
@@ -3126,10 +3126,15 @@ func (bc *BlockChain) insertChainWithWitnesses(chain types.Blocks, setHead bool,
 			// only block being inserted. A bit crude, but witnesses are huge,
 			// so we refuse to make an entire chain of them.
 			if bc.cfg.VmConfig.StatelessSelfValidation || (makeWitness && len(chain) == 1) {
+				log.Info("Creating witness for block", "block", block.NumberU64(), "makeWitness", makeWitness, "chainLen", len(chain), "statelessSelfValidation", bc.cfg.VmConfig.StatelessSelfValidation)
 				witness, err = stateless.NewWitness(block.Header(), bc)
 				if err != nil {
+					log.Error("Failed to create witness", "block", block.NumberU64(), "err", err)
 					return nil, it.index, err
 				}
+				log.Info("Witness created successfully", "block", block.NumberU64())
+			} else {
+				log.Debug("Skipping witness generation", "block", block.NumberU64(), "makeWitness", makeWitness, "chainLen", len(chain), "statelessSelfValidation", bc.cfg.VmConfig.StatelessSelfValidation)
 			}
 			// Bor: We start the prefetcher in process block function called below
 			// and not here as we copy state for block-stm in that function. Also,
@@ -3166,10 +3171,15 @@ func (bc *BlockChain) insertChainWithWitnesses(chain types.Blocks, setHead bool,
 		}
 
 		if computeWitness {
+			log.Info("Computing witness for block", "block", block.NumberU64())
 			witness, err = stateless.NewWitness(block.Header(), bc)
 			if err != nil {
-				log.Error("Error in witness generation", "err", err)
+				log.Error("Error in witness generation", "block", block.NumberU64(), "err", err)
+			} else {
+				log.Info("Witness computed successfully", "block", block.NumberU64())
 			}
+		} else {
+			log.Debug("Skipping witness computation", "block", block.NumberU64(), "computeWitness", computeWitness)
 		}
 
 		receipts, logs, usedGas, statedb, vtime, err := bc.ProcessBlock(block, parent, witness, &followupInterrupt)

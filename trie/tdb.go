@@ -638,7 +638,6 @@ func (t *TrieDB) Witness() map[string]struct{} {
 			proofNodes.Free()
 		}
 	}
-
 	log.Info("TrieDB witness generation complete", "nodes_collected", len(witnessNodes))
 	return witnessNodes
 }

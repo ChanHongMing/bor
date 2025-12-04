@@ -2241,11 +2241,11 @@ func (bc *BlockChain) writeBlockWithState(block *types.Block, receipts []*types.
 			log.Error("error in witness encoding", "caughterr", err)
 		}
 
-		log.Info("Writing witness", "block", block.NumberU64(), "hash", block.Hash(), "size", len(witBuf.Bytes()), "state_nodes", len(statedb.Witness().State))
+		log.Debug("Writing witness", "block", block.NumberU64(), "hash", block.Hash(), "header", statedb.Witness().Header())
 
 		rawdb.WriteWitness(blockBatch, block.Hash(), witBuf.Bytes())
 	} else {
-		log.Info("No witness to write", "block", block.NumberU64())
+		log.Debug("No witness to write", "block", block.NumberU64())
 	}
 
 	if err := blockBatch.Write(); err != nil {
@@ -3133,12 +3133,8 @@ func (bc *BlockChain) insertChainWithWitnesses(chain types.Blocks, setHead bool,
 			if bc.cfg.VmConfig.StatelessSelfValidation || (makeWitness && len(chain) == 1) {
 				witness, err = stateless.NewWitness(block.Header(), bc)
 				if err != nil {
-					log.Error("Failed to create witness", "block", block.NumberU64(), "err", err)
 					return nil, it.index, err
 				}
-				log.Info("Witness created successfully", "block", block.NumberU64())
-			} else {
-				log.Info("Skipping witness generation", "block", block.NumberU64(), "makeWitness", makeWitness, "chainLen", len(chain), "statelessSelfValidation", bc.cfg.VmConfig.StatelessSelfValidation)
 			}
 			// Bor: We start the prefetcher in process block function called below
 			// and not here as we copy state for block-stm in that function. Also,
@@ -3175,15 +3171,10 @@ func (bc *BlockChain) insertChainWithWitnesses(chain types.Blocks, setHead bool,
 		}
 
 		if computeWitness {
-			log.Info("Computing witness for block", "block", block.NumberU64())
 			witness, err = stateless.NewWitness(block.Header(), bc)
 			if err != nil {
-				log.Error("Error in witness generation", "block", block.NumberU64(), "err", err)
-			} else {
-				log.Info("Witness computed successfully", "block", block.NumberU64())
+				log.Error("Error in witness generation", "err", err)
 			}
-		} else {
-			log.Info("Skipping witness computation", "block", block.NumberU64(), "computeWitness", computeWitness)
 		}
 
 		receipts, logs, usedGas, statedb, vtime, err := bc.ProcessBlock(block, parent, witness, &followupInterrupt)

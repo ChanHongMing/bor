@@ -136,7 +136,7 @@ func (s *Snapshot) apply(headers []*types.Header, c *Bor) (*Snapshot, error) {
 		}
 
 		// check if signer is in validator set
-		if !snap.ValidatorSet.HasAddress(signer) && !isPartOfVeBlopSet(signer, number) {
+		if !snap.ValidatorSet.HasAddress(signer) {
 			return nil, &UnauthorizedSignerError{number, signer.Bytes(), snap.ValidatorSet.Validators}
 		}
 
@@ -191,7 +191,7 @@ func (s *Snapshot) GetSignerSuccessionNumber(signer common.Address) (int, error)
 
 	signerIndex, _ := s.ValidatorSet.GetByAddress(signer)
 
-	if signerIndex == -1 && !isPartOfVeBlopSet(signer, s.Number) {
+	if signerIndex == -1 {
 		return -1, &UnauthorizedSignerError{s.Number, signer.Bytes(), s.ValidatorSet.Validators}
 	}
 
